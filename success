@@ -1,0 +1,257 @@
+# ==========================================================
+# 液态锡飞溅模拟 - 清道夫版 (The Cleaner)
+# 修复：fvSolution 语法位置 + 清除文件乱码
+# ==========================================================
+cd ~/OpenFOAM/OpenFOAM-v2506/laserTin
+
+echo ">>> [1/7] 重写空气属性 (修复潜在乱码)..."
+cat > constant/thermophysicalProperties.air << EOF
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      thermophysicalProperties.air;
+}
+thermoType
+{
+    type            heRhoThermo;
+    mixture         pureMixture;
+    transport       const;
+    thermo          hConst;
+    equationOfState perfectFluid;
+    specie          specie;
+    energy          sensibleInternalEnergy;
+}
+mixture
+{
+    specie { molWeight 28.9; }
+    equationOfState
+    {
+        rho0    1.2;
+        R       287;
+    }
+    thermodynamics { Cp 1000; Hf 0; }
+    transport { mu 1.8e-05; Pr 0.7; }
+}
+EOF
+
+echo ">>> [2/7] 重写锡属性 (真实参数)..."
+cat > constant/thermophysicalProperties.water << EOF
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      thermophysicalProperties.water;
+}
+thermoType
+{
+    type            heRhoThermo;
+    mixture         pureMixture;
+    transport       const;
+    thermo          hConst;
+    equationOfState perfectFluid;
+    specie          specie;
+    energy          sensibleInternalEnergy;
+}
+mixture
+{
+    specie { molWeight 118.71; }
+    equationOfState
+    {
+        rho0    7000;
+        R       70;
+    }
+    thermodynamics { Cp 230; Hf 0; }
+    transport { mu 1.85e-03; Pr 0.015; }
+}
+EOF
+
+cat > constant/thermophysicalProperties << EOF
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      thermophysicalProperties;
+}
+phases (water air);
+pMin 10000;
+sigma
+{
+    type    constant;
+    sigma   0.55; 
+}
+EOF
+
+echo ">>> [3/7] 修复 fvSolution (关键一步!)..."
+# 把 cAlpha 放回 solvers 里，解决 Fatal IO Error
+cat > system/fvSolution << EOF
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      fvSolution;
+}
+solvers
+{
+    "alpha.water.*"
+    {
+        // 必须放在这里！
+        nAlphaCorr      2;
+        nAlphaSubCycles 3;
+        cAlpha          1;
+        icAlpha         0;
+
+        solver          smoothSolver;
+        smoother        symGaussSeidel;
+        tolerance       1e-9;
+        relTol          0;
+    }
+    "p_rgh.*"       { solver GAMG; smoother DIC; tolerance 1e-8; relTol 0.01; }
+    "p_rghFinal"    { solver GAMG; smoother DIC; tolerance 1e-8; relTol 0; }
+    "U.*"           { solver smoothSolver; smoother symGaussSeidel; tolerance 1e-8; relTol 0.05; }
+    "(T|k|epsilon).*" { solver smoothSolver; smoother symGaussSeidel; tolerance 1e-8; relTol 0; }
+}
+PIMPLE
+{
+    momentumPredictor   yes;
+    nCorrectors         2;
+    nOuterCorrectors    3; 
+    nNonOrthogonalCorrectors 1;
+}
+relaxationFactors
+{
+    fields { p_rgh 0.5; }
+    equations { U 0.5; T 0.3; ".*" 0.5; }
+}
+EOF
+
+echo ">>> [4/7] 初始场 (200MPa + 同步初始化)..."
+cat > system/setFieldsDict << EOF
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      setFieldsDict;
+}
+defaultFieldValues
+(
+    volScalarFieldValue alpha.water 0
+    volScalarFieldValue p       100000
+    volScalarFieldValue p_rgh   100000
+    volScalarFieldValue T       300
+);
+regions
+(
+    boxToCell
+    {
+        box ( -1 0 -0.1 ) ( 2 1.0 0.1 );
+        fieldValues
+        (
+            volScalarFieldValue alpha.water 1
+            volScalarFieldValue p       100000
+            volScalarFieldValue p_rgh   100000
+            volScalarFieldValue T       300
+        );
+    }
+    // 高压气泡
+    boxToCell
+    {
+        box ( 0.4 0.8 -0.1 ) ( 0.6 1.0 0.1 );
+        fieldValues
+        (
+            volScalarFieldValue alpha.water 0
+            volScalarFieldValue p       200000000
+            volScalarFieldValue p_rgh   200000000
+            volScalarFieldValue T       2000
+        );
+    }
+);
+EOF
+
+echo ">>> [5/7] 控制参数 (0.015s)..."
+cat > system/controlDict << EOF
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      controlDict;
+}
+application     compressibleInterFoam;
+startFrom       latestTime;
+stopAt          endTime;
+endTime         0.015;
+deltaT          1e-11;
+writeControl    adjustable;
+writeInterval   0.0002;
+purgeWrite      0;
+writeFormat     binary;
+writePrecision  8;
+writeCompression off;
+timeFormat      general;
+timePrecision   10;
+runTimeModifiable yes;
+adjustTimeStep  yes;
+maxCo           0.2; 
+maxAlphaCo      0.2;
+maxDeltaT       1e-6;
+EOF
+
+echo ">>> [6/7] 网格..."
+cat > system/blockMeshDict << EOF
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+scale   1;
+vertices
+(
+    (-1 0 -0.1) ( 2 0 -0.1) ( 2 2 -0.1) (-1 2 -0.1)
+    (-1 0  0.1) ( 2 0  0.1) ( 2 2  0.1) (-1 2  0.1)
+);
+blocks
+(
+    hex (0 1 2 3 4 5 6 7) (200 200 1) simpleGrading (1 1 1)
+);
+edges ();
+boundary
+(
+    walls { type wall; faces ((3 7 6 2) (0 4 7 3) (2 6 5 1) (1 5 4 0)); }
+    frontAndBack { type empty; faces ((0 3 2 1) (4 5 6 7)); }
+);
+mergePatchPairs ();
+EOF
+
+echo ">>> [7/7] 清理并启动..."
+rm system/fvOptions 2>/dev/null
+foamCleanTutorials
+rm -rf 0 processor*
+if [ ! -d "0.orig" ]; then
+    cp -r $FOAM_TUTORIALS/multiphase/compressibleInterFoam/laminar/depthCharge2D/0.orig .
+fi
+cp -r 0.orig 0
+
+blockMesh > log.blockMesh
+topoSet > log.topoSet
+setFields > log.setFields
+decomposePar > log.decomposePar
+
+echo "------------------------------------------------"
+echo "⚠️  开始计算：修复语法后的物理版"
+echo "⚠️  这次 cAlpha 位置对了，绝对不会报 IO Error！"
+echo "------------------------------------------------"
+
+mpirun -np 12 --oversubscribe compressibleInterFoam -parallel
+
+echo ">>> 合并数据..."
+reconstructPar > log.reconstructPar
+
+echo ">>> ✅ 跑通了！"

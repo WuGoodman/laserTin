@@ -1,5 +1,35 @@
 #!/bin/bash
 
+# ==============================================================================
+#  PROJECT: Sn Laser Splash Simulation (High-Fidelity) - 2025.12.10
+#  SOLVER:  compressibleInterFoam
+#  STATUS:  STABLE (Fixed Floating Point Exception)
+# ==============================================================================
+#
+#  [1. PHYSICAL CONDITIONS / 物理模型与工况设置]
+#  ---------------------------------------------
+#  - Object:      Air-Sn Multiphase Flow (Compressible) / 空气-锡多相流
+#  - Domain:      2mm x 1mm (2D)
+#  - Mesh:        600 x 300 cells (Resolution approx 3.3 um)
+#  - Laser Spot:  Center (x=0), Width = 200 um
+#  - Impact Load: Pressure = 50 MPa, Temperature = 5000 K
+#
+#  [2. NUMERICAL STABILIZATION / 数值算法优化]
+#  -------------------------------------------
+#  - Pressure Solver: PCG (Preconditioned Conjugate Gradient)
+#    * Change: Replaced GAMG with PCG.
+#    * Reason: GAMG is unstable under 50MPa shock; PCG prevents crashing.
+#    * 原因: GAMG在高压激波下易发散，PCG更稳健。
+#
+#  - Time Step Control:
+#    * Max Courant Number = 0.1 (Lowered from 0.2 for stability)
+#    * Max DeltaT = 50 ns (5e-8s) to capture shock wavefront
+#
+# ==============================================================================
+
+
+#!/bin/bash
+
 # ==========================================================
 #  Project: Sn Laser Splash Simulation (High-Fidelity)
 #  Solver: compressibleInterFoam

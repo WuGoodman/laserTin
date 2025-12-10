@@ -1,0 +1,163 @@
+# ==========================================================
+# 液态锡 (Sn) 激光冲击波模拟 - 标准运行脚本
+# 物理模型：PerfectFluid + Magic R (修正声速)
+# 目标：捕捉 0.001s 内的高速冲击波传播
+# ==========================================================
+
+# 1. 进入工作目录
+cd ~/OpenFOAM/OpenFOAM-v2506/laserTin
+
+echo ">>> [1/7] 初始化配置：写入物理参数..."
+
+# --- A. 写入物性参数 (修正声速核心) ---
+# R = 20833, 确保声速 ~2900 m/s
+cat > constant/thermophysicalProperties.water << EOF
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      thermophysicalProperties.water;
+}
+thermoType
+{
+    type            heRhoThermo;
+    mixture         pureMixture;
+    transport       const;
+    thermo          hConst;
+    equationOfState perfectFluid;
+    specie          specie;
+    energy          sensibleInternalEnergy;
+}
+mixture
+{
+    specie
+    {
+        molWeight   118.71;
+    }
+    equationOfState
+    {
+        rho0        7000;
+        R           20833;  // <--- 【核心参数】修正声速至 2900 m/s
+    }
+    thermodynamics
+    {
+        Cp          230;
+        Hf          0;
+    }
+    transport
+    {
+        mu          1.85e-03;
+        Pr          0.015;
+    }
+}
+EOF
+
+# --- B. 写入初始场 (深水引爆) ---
+# 压力 100 MPa (1000 bar)
+cat > system/setFieldsDict << EOF
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      setFieldsDict;
+}
+defaultFieldValues
+(
+    volScalarFieldValue alpha.water 0
+    volScalarFieldValue p 100000
+    volScalarFieldValue T 300
+);
+regions
+(
+    // 背景液态锡
+    boxToCell
+    {
+        box ( -100 -100 -100 ) ( 100 1.0 100 );
+        fieldValues
+        (
+            volScalarFieldValue alpha.water 1
+            volScalarFieldValue p 100000
+            volScalarFieldValue T 300
+        );
+    }
+    // 激光高压区 (爆炸源)
+    boxToCell
+    {
+        box ( 0.4 0.8 -100 ) ( 0.6 1.0 100 );
+        fieldValues
+        (
+            volScalarFieldValue alpha.water 1
+            volScalarFieldValue p 100000000
+            volScalarFieldValue T 5000
+        );
+    }
+);
+EOF
+
+# --- C. 写入控制参数 ---
+# 10微秒存一张图，捕捉高速波
+cat > system/controlDict << EOF
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      controlDict;
+}
+application     compressibleInterFoam;
+startFrom       latestTime;
+stopAt          endTime;
+endTime         0.001;
+deltaT          1e-9;
+writeControl    adjustable;
+writeInterval   0.00001;
+purgeWrite      0;
+writeFormat     binary;
+writePrecision  8;
+writeCompression off;
+timeFormat      general;
+timePrecision   10;
+runTimeModifiable yes;
+adjustTimeStep  yes;
+maxCo           0.2;
+maxAlphaCo      0.2;
+maxDeltaT       1e-6;
+EOF
+
+echo ">>> [2/7] 清理旧数据..."
+foamCleanTutorials
+rm -rf 0 processor*
+# 自动修复 0.orig
+if [ ! -d "0.orig" ]; then
+    cp -r $FOAM_TUTORIALS/multiphase/compressibleInterFoam/laminar/depthCharge2D/0.orig .
+fi
+cp -r 0.orig 0
+
+echo ">>> [3/7] 生成网格 (blockMesh)..."
+blockMesh > log.blockMesh
+
+echo ">>> [4/7] 标记区域 (topoSet)..."
+topoSet > log.topoSet
+
+echo ">>> [5/7] 埋设高压炸弹 (setFields)..."
+setFields > log.setFields
+
+echo ">>> [6/7] 切分网格 (decomposePar)..."
+decomposePar > log.decomposePar
+
+echo ">>> [7/7] 开始并行计算 (直播模式)..."
+echo "-------------------------------------------------------"
+echo "⚠️  注意：请盯着屏幕看 Time 的变化，不要按 Ctrl+C ！"
+echo "    物理声速已修正为 ~2900 m/s，冲击波将快速传播。"
+echo "-------------------------------------------------------"
+
+# 开启直播，不屏蔽输出
+mpirun -np 12 --oversubscribe compressibleInterFoam -parallel
+
+# 计算结束后自动合并
+echo ">>> 计算结束，正在合并数据 (Reconstructing)..."
+reconstructPar > log.reconstructPar
+
+echo ">>> ✅ 全部完成！请打开 ParaView 查看 Time=0.0001 时的压力波！"

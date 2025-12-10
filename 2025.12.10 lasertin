@@ -1,0 +1,207 @@
+#!/bin/bash
+
+# ==========================================================
+#  Project: Sn Laser Splash Simulation (High-Fidelity)
+#  Solver: compressibleInterFoam
+#  Mesh: 600 x 300 (Approx 3.3um resolution)
+#  Stability Mode: PCG Solver + MaxCo 0.1
+# ==========================================================
+
+# 1. 初始化工作目录
+CASE_NAME="Sn_Splash_Stable"
+TARGET_DIR="$PWD/$CASE_NAME"
+
+# 环境清理与重建
+if [ -d "$TARGET_DIR" ]; then
+    cd "$TARGET_DIR" || exit 1
+    rm -rf *
+else
+    mkdir -p "$TARGET_DIR"
+    cd "$TARGET_DIR" || exit 1
+fi
+
+mkdir -p 0 constant system
+
+# ==================== System Settings ====================
+
+# 1. 网格生成 (600x300)
+cat << EOF > system/blockMeshDict
+FoamFile { version 2.0; format ascii; class dictionary; object blockMeshDict; }
+convertToMeters 0.001;
+vertices
+(
+    (-1   0    0)
+    ( 1   0    0)
+    ( 1   1    0)
+    (-1   1    0)
+    (-1   0    0.1)
+    ( 1   0    0.1)
+    ( 1   1    0.1)
+    (-1   1    0.1)
+);
+blocks
+(
+    hex (0 1 2 3 4 5 6 7) (600 300 1) simpleGrading (1 1 1)
+);
+edges ();
+boundary
+(
+    crucible { type wall; faces ( (0 1 5 4) (1 2 6 5) (0 4 7 3) ); }
+    atmosphere { type patch; faces ( (3 2 6 7) ); }
+    frontAndBack { type empty; faces ( (0 1 2 3) (4 5 6 7) ); }
+);
+mergePatchPairs ();
+EOF
+
+# 2. 时间控制 (高稳定性设置)
+cat << EOF > system/controlDict
+FoamFile { version 2.0; format ascii; class dictionary; object controlDict; }
+application     compressibleInterFoam;
+startFrom       startTime;
+startTime       0;
+stopAt          endTime;
+endTime         100e-6;    // 模拟总时长 100us
+deltaT          1e-13;     // 初始极小步长
+writeControl    adjustableRunTime;
+writeInterval   1e-6;      // 每 1us 输出一次结果
+purgeWrite      0;
+writeFormat     ascii;
+writePrecision  6;
+writeCompression off;
+timeFormat      general;
+timePrecision   6;
+runTimeModifiable yes;
+adjustTimeStep  yes;
+maxCo           0.1;       // [关键参数] 库朗数限制在 0.1 以防崩溃
+maxAlphaCo      0.1;
+maxDeltaT       5e-8;      // [关键参数] 强制限制最大物理步长 50ns
+EOF
+
+# 3. 物理场初始化 (setFields)
+cat << EOF > system/setFieldsDict
+FoamFile { version 2.0; format ascii; class dictionary; object setFieldsDict; }
+defaultFieldValues ( volScalarFieldValue alpha.Sn 0 volScalarFieldValue alpha.air 1 volScalarFieldValue p 100000 volScalarFieldValue T 300 );
+regions
+(
+    // 液池区域
+    boxToCell { box (-1.5 -0.1 -0.1) (1.5 0.5 0.2); fieldValues ( volScalarFieldValue alpha.Sn 1 volScalarFieldValue alpha.air 0 ); }
+    // 激光冲击区域 (高温高压源)
+    boxToCell { box (-0.1 0.49 -0.1) (0.1 0.51 0.2); fieldValues ( volScalarFieldValue T 5000 volScalarFieldValue p 50000000 ); }
+);
+EOF
+
+# 4. 离散格式
+cat << EOF > system/fvSchemes
+FoamFile { version 2.0; format ascii; class dictionary; object fvSchemes; }
+ddtSchemes { default Euler; }
+gradSchemes { default Gauss linear; }
+divSchemes
+{
+    default             Gauss vanLeer;
+    div(phirb,alpha)    Gauss linear;
+    div(((rho*nuEff)*dev2(T(grad(U))))) Gauss linear;
+}
+laplacianSchemes { default Gauss linear corrected; }
+interpolationSchemes { default linear; }
+snGradSchemes { default corrected; }
+EOF
+
+# 5. 求解器设置 (使用 PCG 替代 GAMG)
+cat << EOF > system/fvSolution
+FoamFile { version 2.0; format ascii; class dictionary; object fvSolution; }
+solvers {
+    "alpha.*" { nAlphaCorr 1; nAlphaSubCycles 2; cAlpha 1; solver smoothSolver; smoother symGaussSeidel; tolerance 1e-8; relTol 0; }
+    
+    // [稳定性修正] 使用 PCG 求解器处理压力场
+    "p_rgh.*" 
+    { 
+        solver PCG; 
+        preconditioner DIC; 
+        tolerance 1e-7; 
+        relTol 0.01; 
+    }
+    
+    "(U|k|epsilon|e).*" { solver smoothSolver; smoother symGaussSeidel; tolerance 1e-6; relTol 0.1; }
+    "T.*" { solver PBiCGStab; preconditioner DILU; tolerance 1e-6; relTol 0.1; }
+}
+PIMPLE { momentumPredictor no; nCorrectors 3; nNonOrthogonalCorrectors 0; }
+EOF
+
+# ==================== Physical Properties ====================
+
+cat << EOF > constant/thermophysicalProperties
+FoamFile { version 2.0; format ascii; class dictionary; object thermophysicalProperties; }
+phases (air Sn); sigma 0.544; pMin 10000;
+EOF
+
+# 空气物性
+cat << EOF > constant/thermophysicalProperties.air
+FoamFile { version 2.0; format ascii; class dictionary; object thermophysicalProperties.air; }
+thermoType { type heRhoThermo; mixture pureMixture; transport const; thermo hConst; equationOfState perfectGas; specie specie; energy sensibleInternalEnergy; }
+mixture { specie { molWeight 28.9; } thermodynamics { Cp 1004.5; Hf 0; } transport { mu 1.8e-05; Pr 0.7; } }
+EOF
+
+# 锡(Sn)物性
+cat << EOF > constant/thermophysicalProperties.Sn
+FoamFile { version 2.0; format ascii; class dictionary; object thermophysicalProperties.Sn; }
+thermoType { type heRhoThermo; mixture pureMixture; transport const; thermo hConst; equationOfState adiabaticPerfectFluid; specie specie; energy sensibleInternalEnergy; }
+mixture { specie { molWeight 118.71; } thermodynamics { Cp 227; Hf 0; } transport { mu 1.85e-03; Pr 0.015; }
+equationOfState { p0 100000; rho0 7310; gamma 6.0; B 3e9; } }
+EOF
+
+cat << EOF > constant/g
+FoamFile { version 2.0; format ascii; class dictionary; object g; }
+dimensions [0 1 -2 0 0 0 0]; value (0 -9.81 0);
+EOF
+
+cat << EOF > constant/turbulenceProperties
+FoamFile { version 2.0; format ascii; class dictionary; object turbulenceProperties; }
+simulationType laminar;
+EOF
+
+# ==================== Initialization ====================
+
+echo ">>> Writing Initial Fields..."
+# 压力场
+cat << EOF > 0/p
+FoamFile { version 2.0; format ascii; class volScalarField; location "0"; object p; }
+dimensions [1 -1 -2 0 0 0 0]; internalField uniform 100000;
+boundaryField { crucible { type fixedFluxPressure; value uniform 100000; } atmosphere { type totalPressure; p0 uniform 100000; } frontAndBack { type empty; } }
+EOF
+cp 0/p 0/p_rgh
+sed -i 's/object p;/object p_rgh;/g' 0/p_rgh
+
+# 温度场
+cat << EOF > 0/T
+FoamFile { version 2.0; format ascii; class volScalarField; location "0"; object T; }
+dimensions [0 0 0 1 0 0 0]; internalField uniform 300;
+boundaryField { crucible { type zeroGradient; } atmosphere { type inletOutlet; inletValue uniform 300; value uniform 300; } frontAndBack { type empty; } }
+EOF
+
+# 速度场
+cat << EOF > 0/U
+FoamFile { version 2.0; format ascii; class volVectorField; location "0"; object U; }
+dimensions [0 1 -1 0 0 0 0]; internalField uniform (0 0 0);
+boundaryField { crucible { type noSlip; } atmosphere { type pressureInletOutletVelocity; value uniform (0 0 0); } frontAndBack { type empty; } }
+EOF
+
+# 相场
+cat << EOF > 0/alpha.Sn
+FoamFile { version 2.0; format ascii; class volScalarField; location "0"; object alpha.Sn; }
+dimensions [0 0 0 0 0 0 0]; internalField uniform 0;
+boundaryField { crucible { type zeroGradient; } atmosphere { type inletOutlet; inletValue uniform 0; value uniform 0; } frontAndBack { type empty; } }
+EOF
+
+cat << EOF > 0/alpha.air
+FoamFile { version 2.0; format ascii; class volScalarField; location "0"; object alpha.air; }
+dimensions [0 0 0 0 0 0 0]; internalField uniform 1;
+boundaryField { crucible { type zeroGradient; } atmosphere { type inletOutlet; inletValue uniform 1; value uniform 1; } frontAndBack { type empty; } }
+EOF
+
+# ==================== Execution ====================
+echo ">>> Generating Mesh and Fields..."
+blockMesh > log.blockMesh 2>&1
+setFields > log.setFields 2>&1
+
+echo ">>> Starting Solver (tee log.run)..."
+compressibleInterFoam | tee log.run
